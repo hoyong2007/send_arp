@@ -3,7 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <net/ethernet.h>
+#include <net/if.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/in.h>
@@ -18,19 +22,21 @@ struct arphdr{
 	uint8_t hw_len;
 	uint8_t pro_len;
 	uint16_t opcode;
-	uint8_t src_mac[6];
-	uint8_t src_ip[4];
-	uint8_t dst_mac[6];
-	uint8_t dst_ip[4];
+	uint8_t sdr_mac[6];
+	uint8_t sdr_ip[4];
+	uint8_t tar_mac[6];
+	uint8_t tar_ip[4];
 };
 
 struct base_info{
 	u_char dev[10];
 	u_char sdr_ip[20];
 	u_char tar_ip[20];
+	uint8_t my_ip[INET_ADDRSTRLEN];
 	uint8_t my_mac[6];
 	uint8_t sdr_mac[6];
 };
+
 
 void Init_arp(struct arphdr *arp, uint16_t opcode);
 int Get_my_hwaddr(struct base_info *info);
@@ -40,6 +46,7 @@ int Get_sender_hwaddr(struct base_info *info);
 int main(int argc, char *argv[])
 {
 	struct base_info info;
+	int i;
 
 	if (argc != 4) {
 		printf("Usage : ./pcap_test [interface] [sender ip] [target ip]\n");
@@ -49,15 +56,15 @@ int main(int argc, char *argv[])
 	strcpy(info.dev, argv[1]);
 	strcpy(info.sdr_ip, argv[2]);
 	strcpy(info.tar_ip, argv[3]);
-	printf("%s\n", info.sdr_ip);
-	printf("%s\n", info.tar_ip);
+	//printf("%s\n", info.sdr_ip);
+	//printf("%s\n", info.tar_ip);
 	if (!Get_my_hwaddr(&info))
 		return -1;
-	printf("%s\n", info.my_mac);
+	//for (i=0 ; i<6 ; i++)
+	//	printf(" %02x\n", info.my_mac[i]);
 
 	if (!Get_sender_hwaddr(&info))
 		return -1;
-	printf("%s\n", info.sdr_mac);
 	
 	return(0);
 }
@@ -65,8 +72,8 @@ int main(int argc, char *argv[])
 
 void Init_arp(struct arphdr *arp, uint16_t opcode)
 {
-	arp->hw_type = htons(1);
-	arp->pro_type = htons(0x0800);
+	arp->hw_type = htons(1);	/* type Ethernet */
+	arp->pro_type = htons(0x0800);	/* protocol IP */
 	arp->hw_len = 6;
 	arp->pro_len = 4;
 	arp->opcode = htons(opcode);
@@ -77,24 +84,25 @@ int Get_my_hwaddr(struct base_info *info)
 {
 	FILE *fp;
 	int i;
+	int fd;
+	struct ifreq ifr;
 	char hwaddr[20];
-	char file[30] = "/sys/class/net/";
-	unsigned int mac[6];
-	strcat(file, info->dev);
-	strcat(file, "/address");
 
-	printf("%s\n", file);
-	fp = fopen(file, "r");
-	if (!fp || (fscanf(fp, "%s", hwaddr) == -1))
-	{
-		fprintf(stderr, "Couldn't open file %s\n", file);
-		return 0;
-	}
-	fclose(fp);
-
-	sscanf(hwaddr, "%x:%x:%x:%x:%x:%x", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	ifr.ifr_addr.sa_family = AF_INET;
+	strncpy(ifr.ifr_name, info->dev, IFNAMSIZ-1);
+	ioctl(fd, SIOCGIFADDR, &ifr);	
+	
+	inet_ntop(AF_INET, &(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), info->my_ip, INET_ADDRSTRLEN);
+	ioctl(fd, SIOCGIFHWADDR, &ifr);
 	for (i=0 ; i<6 ; i++)
-		info->my_mac[i] = (uint8_t)mac[i];
+		info->my_mac[i] = ((unsigned char*)ifr.ifr_hwaddr.sa_data)[i];
+	close(fd);
+	
+	//printf("%s\n", info->my_ip);
+	//for (i=0 ; i<6 ; i++)
+	//	printf(" %02x", info->my_mac[i]);
+	//printf("\n");
 
 	return 1;
 }
@@ -135,24 +143,28 @@ int Get_sender_hwaddr(struct base_info *info)
 		return(2);
 	}
 
-
+	//printf("%d\n", (unsigned int)net);
 	/* set ethernet header */
 	for (i=0 ; i<6 ; i++)
-		ether.h_source[i] = 0xff;
+		ether.h_source[i] = info->my_mac[i];
 	for (i=0 ; i<6 ; i++)
-		ether.h_dest[i] = info->my_mac[i];
+		ether.h_dest[i] = 0xff;
 	ether.h_proto = htons(ETHERTYPE_ARP);
 	memcpy(send, (char*)&ether, 14);
 
 	/* set arp header */
 	Init_arp(&arp, ARP_REQUEST);
-	inet_pton(AF_INET, info->sdr_ip, &arp.src_ip);
-	inet_pton(AF_INET, info->tar_ip, &arp.dst_ip);
+	inet_pton(AF_INET, info->my_ip, &arp.sdr_ip);
+	inet_pton(AF_INET, info->sdr_ip, &arp.tar_ip);
 	for (i=0 ; i<6 ; i++)
-		arp.src_mac[i] = info->my_mac[i];
+		arp.sdr_mac[i] = info->my_mac[i];
 	for (i=0 ; i<6 ; i++)
-		arp.dst_mac[i] = 0x00;
-	memcpy(send+14, (char*)&arp, 28);
+		arp.tar_mac[i] = 0x00;
+	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
+
+	for (i=0 ; i<(sizeof(struct arphdr)+sizeof(struct ethhdr)) ; i++)
+		printf("%02x%c", send[i], i%10==0 ? '\n' : ' ');
+	printf("\n%d", i);
 
 	while(1) {
 		/* Send arp request to sender */
@@ -178,13 +190,27 @@ int Get_sender_hwaddr(struct base_info *info)
 			recv_arp = (struct arphdr*)(recv + 14);
 			if (ntohs(recv_arp->opcode) == ARP_REPLY)
 			{
+				printf("Get ARP Reply\n");
 				for (i=0 ; i<6 ; i++)
-					info->sdr_mac[i] = recv_arp->src_mac[i];
+					info->sdr_mac[i] = recv_arp->sdr_mac[i];
 				break;
 			}
 		}
 	}
+	for (i=0 ; i<6 ; i++)
+		printf(" %02x", info->sdr_mac[i]);
+	printf("\n");
 	pcap_close(handle);
 	return 1;
 }
+
+
+
+/*
+* arp request -> ether.src_mac == arp.sdr_mac == my_mac
+*				 ether.dst_mac = ff:ff:ff:ff:ff:ff
+*				 arp.tar_mac = 00:00:00:00:00:00
+*				 sdr == my_pc
+*				 tar == target
+*/
 
